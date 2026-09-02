@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+
+# Build output
+dist/
+build/
+
+# Generated SBOMs -- this tool's own output, never source
+sbom.json
+*.sbom.json
+
+# Build trees and downloaded artifacts used for manual testing.
+# Fixtures under tests/fixtures/ are committed on purpose; see its PROVENANCE.md.
+buildroot/
+output/
+grype
+*.tar.gz
+*.tar.xz
+*.tar.zst

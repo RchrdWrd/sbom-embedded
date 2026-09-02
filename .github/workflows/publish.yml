@@ -1,0 +1,101 @@
+name: Publish
+
+# Publishes to PyPI when a version tag is pushed, using Trusted Publishing:
+# PyPI verifies this workflow's identity through OpenID Connect, so there is no
+# API token to create, store or leak. See the setup steps in CONTRIBUTING or in
+# the README's release section.
+#
+# Run it once against TestPyPI first (workflow_dispatch below) to check the
+# rendered project page before anything reaches the real index -- a PyPI
+# release cannot be replaced, only yanked.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+
+      - name: Check the tag matches the packaged version
+        # A tag that disagrees with pyproject would publish the wrong version
+        # under the right name, which cannot be undone.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          packaged=$(ls dist/*.tar.gz | sed -E 's/.*-([0-9][^-]*)\.tar\.gz/\1/')
+          echo "tag=$tag packaged=$packaged"
+          test "$tag" = "$packaged"
+
+      - name: Smoke-test the built wheel
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install --quiet dist/*.whl
+          /tmp/wheeltest/bin/sbom-embedded --version
+          /tmp/wheeltest/bin/sbom-embedded tests/fixtures/buildroot-2026.08 \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert len(d["components"]) == 44; print("wheel produced", len(d["components"]), "components")'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    name: publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/sbom-embedded
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    name: publish to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sbom-embedded
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
