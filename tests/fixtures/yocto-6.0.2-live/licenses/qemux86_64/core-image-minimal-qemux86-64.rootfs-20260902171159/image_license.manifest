@@ -1,0 +1,5 @@
+RECIPE NAME: linux-yocto
+VERSION: 6.18.24+git
+LICENSE: GPL-2.0-with-Linux-syscall-note
+FILES: bzImage--6.18.24+git0+f94e250f9b_b1ba542851-r0-qemux86-64-20260707034537.bin modules--6.18.24+git0+f94e250f9b_b1ba542851-r0-qemux86-64-20260707034537.tgz
+
