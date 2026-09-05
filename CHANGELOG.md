@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-05
+## [0.2.0] - 2026-09-06
 
 Ten defects, found by auditing the codebase against its own documented
 promises. Four of them produced a wrong SBOM with exit code 0, which the
