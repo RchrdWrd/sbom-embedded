@@ -61,11 +61,31 @@ def test_a_missing_path_is_reported(tmp_path):
         detect(tmp_path / "nope")
 
 
-def test_a_file_is_not_a_build_directory(tmp_path):
+def test_a_file_that_is_not_a_manifest_is_refused(tmp_path):
     target = tmp_path / "sbom.json"
     target.write_text("{}")
-    with pytest.raises(DetectionError, match="not a directory"):
+    with pytest.raises(DetectionError, match=r"only manifest\.csv"):
         detect(target)
+
+
+def test_the_buildroot_manifest_can_be_given_directly(fixtures):
+    # `buildroot.find_manifest` documents this and has always supported it;
+    # nothing reached that branch, because detect() refused every
+    # non-directory first.
+    manifest = fixtures / "buildroot-2023.02" / "legal-info" / "manifest.csv"
+    found = detect(manifest)
+    assert found.system is BuildSystem.BUILDROOT
+    assert found.root == manifest
+
+
+def test_a_host_manifest_given_directly_is_refused(tmp_path):
+    # Same columns and the same parser, but it lists the build host's tools.
+    # Accepting any file by path would have put ccache and pkgconf into the
+    # firmware's SBOM -- exactly what buildroot.py declines to do.
+    host = tmp_path / "host-manifest.csv"
+    host.write_text("PACKAGE,VERSION,LICENSE\nccache,4.10,GPL-3.0\n")
+    with pytest.raises(DetectionError, match=r"only manifest\.csv"):
+        detect(host)
 
 
 def test_a_complete_buildroot_output_tree_is_not_mistaken_for_yocto(tmp_path):

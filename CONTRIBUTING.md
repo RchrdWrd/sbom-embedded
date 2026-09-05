@@ -27,6 +27,18 @@ Before opening a pull request:
 CI runs all four on Python 3.11 through 3.14, builds the distribution, and
 installs the declared dependency floors to check they are real.
 
+Two jobs do not run on a pull request, and are worth knowing about:
+
+* **`upstream-canary`** runs weekly, and on demand from the Actions tab. It
+  installs the newest dependencies *past* the cap `pyproject.toml` declares,
+  and a `--pre` variant so a new major shows up before its final release, then
+  runs the suite with `-W error::DeprecationWarning`. It is what keeps the cap
+  from silently going stale, and it must never gate a merge, because it fails
+  for reasons that have nothing to do with the change under review.
+* The **Publish** workflow runs the suite before it builds. It is triggered by
+  a tag rather than by the CI run that tested the commit, so without that a tag
+  pushed to a red `main` would publish a broken release.
+
 ## Fixtures
 
 Every fixture under `tests/fixtures` is unmodified output from a real Yocto or

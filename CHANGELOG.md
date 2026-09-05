@@ -73,6 +73,21 @@ exit 1, and Yocto purls change on builds that use a PR service.
 - **`bom-ref` and `purl` could disagree.** They were serialised from two
   representations of the same value, and `PackageURL.from_string` re-normalises
   path segments, so the emitted purl was not always the one the tool computed.
+- **`-o` truncated its destination before writing.** A failure part-way
+  through -- a full disk, a quota, a broken mount -- left a truncated file
+  where a previously good SBOM had been, and that file is not valid JSON. The
+  exit code said the run failed; the artifact beside it said otherwise, and in
+  a pipeline that overwrites a kept `sbom.json` the previous one was simply
+  gone. The document is now written to a temporary file in the same directory,
+  fsynced, given the mode a plain write would have produced, and renamed over
+  the destination.
+- **A path to `manifest.csv` was refused**, though `buildroot.find_manifest`
+  has documented accepting it from the start -- "the file itself, because all
+  three are things a person reasonably types". Nothing reached that branch,
+  because `detect()` rejected every non-directory first. Only that exact name
+  is taken: `host-manifest.csv` has the same columns and the same parser but
+  lists the build host's tools, so accepting any file by path would have put
+  ccache and pkgconf into a firmware SBOM.
 - **Two error paths echoed unbounded input.** `_excerpt()` bounds every other
   message in `yocto.py`; the missing-`PACKAGE NAME` and duplicate-key paths
   interpolated raw keys at full length, so a 5 MB line produced 5 MB of stderr.
@@ -138,6 +153,8 @@ exit 1, and Yocto purls change on builds that use a PR service.
   distinct strings but indistinguishable as purls -- is now the test.
 - The closed-stdout test quoted its arguments; it would have failed on any
   checkout path containing a space, for reasons unrelated to what it tests.
+- `CONTRIBUTING.md` now describes the two jobs that do not run on a pull
+  request, and why neither should gate a merge.
 
 ### Documentation
 

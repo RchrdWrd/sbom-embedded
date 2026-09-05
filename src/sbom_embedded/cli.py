@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -27,6 +28,46 @@ def _discard_stdout() -> None:
     """
     with contextlib.suppress(OSError, ValueError):
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+
+
+def _write_output(document: str, output: Path) -> None:
+    """Write the document to `output` without destroying what was there.
+
+    `Path.write_text` truncates the destination and only then writes, so a
+    failure part-way -- a full disk, a quota, a broken mount -- leaves a
+    truncated file where a previously good SBOM used to be, and that file is
+    not valid JSON. The exit code says the run failed; the artifact sitting
+    beside it says otherwise, and in a pipeline that overwrites a kept
+    `sbom.json` the previous one is simply gone.
+
+    Writing to a temporary file in the same directory and renaming it over the
+    destination makes the replacement atomic: a reader sees either the whole
+    old document or the whole new one, never half of either, and a failure
+    leaves the old one untouched. Same directory because a rename is only
+    atomic within one filesystem.
+    """
+    descriptor, name = tempfile.mkstemp(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".tmp"
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(document + "\n")
+            handle.flush()
+            # The rename is atomic, but only orders against data that has
+            # actually reached the disk. Without this a crash can leave the
+            # destination name pointing at an empty file.
+            os.fsync(handle.fileno())
+        # mkstemp creates 0600; write_text would have produced 0666 & ~umask.
+        # Match it, so replacing a file does not quietly change who may read
+        # the SBOM.
+        umask = os.umask(0)
+        os.umask(umask)
+        temporary.chmod(0o666 & ~umask)
+        temporary.replace(output)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _write_stdout(document: str) -> None:
@@ -199,7 +240,7 @@ def main(
         _write_stdout(document)
     else:
         try:
-            output.write_text(document + "\n", encoding="utf-8")
+            _write_output(document, output)
         except OSError as err:
             typer.secho(
                 f"error: cannot write {output}: {err}", fg=typer.colors.RED, err=True

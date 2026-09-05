@@ -4,6 +4,11 @@ The user should not have to know, and more to the point should not have to
 remember, whether a given directory is a Yocto deploy tree or a Buildroot
 output tree.
 
+A path to `manifest.csv` itself is accepted too, since that is the one
+artifact whose path a person is as likely to type as the directory holding
+it. Only that exact name: `host-manifest.csv` sits beside it with the same
+columns and lists the build host's tools.
+
 Both are recognised by the presence of an artifact a parser would go on to
 read, which rules out the obvious false positive: an empty `images/` directory
 is not a Yocto build. It is an existence check, not a parse, so it does not
@@ -17,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from .buildroot import MANIFEST_NAME
 
 
 class DetectionError(Exception):
@@ -117,6 +124,23 @@ def detect(root: Path) -> Detected:
     """
     if not root.exists():
         raise DetectionError(f"{root} does not exist")
+    if root.is_file():
+        # A Buildroot manifest is the one artifact whose path a person
+        # reasonably types instead of the directory holding it, and
+        # `buildroot.find_manifest` has always accepted it -- but nothing
+        # reached that branch, because every non-directory was refused here
+        # first.
+        #
+        # Only that exact name. `host-manifest.csv` sits beside it and lists
+        # build-time tools like ccache and pkgconf; reading it as the target
+        # manifest would put the build host's packages into the firmware's
+        # SBOM, which is precisely what buildroot.py declines to do.
+        if root.name == MANIFEST_NAME:
+            return Detected(BuildSystem.BUILDROOT, root)
+        raise DetectionError(
+            f"{root} is a file; only {MANIFEST_NAME} can be given directly, "
+            f"otherwise point at the directory holding the build output"
+        )
     if not root.is_dir():
         raise DetectionError(f"{root} is not a directory")
 

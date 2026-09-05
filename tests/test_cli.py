@@ -1,4 +1,5 @@
 import json
+import os
 from importlib.metadata import version
 
 from cyclonedx.schema import SchemaVersion
@@ -295,3 +296,55 @@ def test_the_reported_version_is_the_packaged_one():
     result = run("--version")
     assert result.exit_code == 0
     assert result.stdout.strip() == f"sbom-embedded {__version__}"
+
+
+def test_a_failed_write_leaves_the_previous_document_intact(fixtures, tmp_path):
+    # Path.write_text truncates the destination and only then writes, so a
+    # failure part-way left a truncated file where a good SBOM had been -- and
+    # that file is not valid JSON. The exit code said the run failed; the
+    # artifact beside it said otherwise.
+    output = tmp_path / "sbom.json"
+    output.write_text('{"previous": true}')
+
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    original = os.fsync
+    os.fsync = no_space
+    try:
+        result = run(fixtures / "buildroot-2026.08", "-o", output)
+    finally:
+        os.fsync = original
+
+    assert result.exit_code == 1
+    assert "cannot write" in result.output
+    assert json.loads(output.read_text()) == {"previous": True}
+    # And nothing half-written left behind under a temporary name.
+    assert [p.name for p in tmp_path.iterdir()] == ["sbom.json"]
+
+
+def test_the_written_file_is_as_readable_as_any_other(fixtures, tmp_path):
+    # The write goes through a temporary file, which is created 0600. Without
+    # matching what write_text would have produced, replacing an SBOM would
+    # quietly narrow who can read it.
+    output = tmp_path / "sbom.json"
+    reference = tmp_path / "reference.json"
+    reference.write_text("{}")
+    assert run(fixtures / "buildroot-2023.02", "-o", output).exit_code == 0
+    assert output.stat().st_mode == reference.stat().st_mode
+
+
+def test_the_buildroot_manifest_can_be_given_directly(fixtures):
+    manifest = fixtures / "buildroot-2026.08" / "legal-info" / "manifest.csv"
+    result = run(manifest)
+    assert result.exit_code == 0
+    assert len(json.loads(result.stdout)["components"]) == 44
+
+
+def test_a_host_manifest_given_directly_is_refused(tmp_path):
+    host = tmp_path / "host-manifest.csv"
+    host.write_text("PACKAGE,VERSION,LICENSE\nccache,4.10,GPL-3.0\n")
+    result = run(host)
+    assert result.exit_code == 1
+    assert "only manifest.csv" in result.output
+    assert "Traceback" not in result.output

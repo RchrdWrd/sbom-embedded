@@ -8,7 +8,7 @@ Every checkable claim here has been verified against the source or by running
 the code. Where a statement comes from outside this repository it says so.
 
 Version described: 0.2.0. Python 3.11+. Runtime dependencies: `typer`,
-`cyclonedx-python-lib`, `packageurl-python`. 127 tests.
+`cyclonedx-python-lib`, `packageurl-python`. 133 tests.
 
 ---
 
@@ -526,6 +526,15 @@ at the given path and at conventional levels below it, so pointing at
 `images/*/*.manifest`, `licenses/*/license.manifest`,
 `licenses/*/*/license.manifest`, or by `manifest.csv` being a file.
 
+**A path to `manifest.csv` is accepted as well.** `buildroot.find_manifest`
+documented that from the start — "the file itself, because all three are
+things a person reasonably types" — but nothing ever reached the branch,
+because every non-directory was refused here first. Only that exact name is
+taken: `host-manifest.csv` has the same columns and the same parser but lists
+the build host's tools, so accepting any file by path would have put ccache
+and pkgconf into a firmware SBOM. Any other file is refused by name rather
+than parsed and discovered to be wrong.
+
 This rules out the obvious false positive — an empty `images/` directory is
 not a Yocto build — but it is an existence check, not a parse, and it does
 **not** promise the parser will then succeed. Cases that detect and then fail
@@ -654,6 +663,13 @@ sbom-embedded PATH [--format cyclonedx] [--image NAME] [--name NAME]
 * The SBOM goes to **stdout** via `sys.stdout.write`, with a trailing newline,
   so `> sbom.json` produces a well-formed text file. With `-o`, stdout stays
   empty and a progress line goes to stderr.
+* **`-o` replaces the destination atomically.** The document is written to a
+  temporary file in the same directory, fsynced, given the mode
+  `write_text` would have produced, and renamed over the destination. A reader
+  therefore sees either the whole previous document or the whole new one.
+  Until 0.2.0 the write truncated the destination first, so a failure part-way
+  left a truncated file — not valid JSON — where a good SBOM had been: the
+  exit code said the run failed and the artifact beside it said otherwise.
 * That write is flushed explicitly and guarded, like the `-o` one. Without the
   flush a failure surfaced only when CPython flushed at interpreter shutdown,
   after the command had already returned — exit **120** with `Exception
@@ -717,7 +733,7 @@ manifests exist, `--image` takes the full label.
 
 ## 11. Testing
 
-127 tests. Run: `.venv/bin/python -m pytest`. Wall-clock is dominated by one
+133 tests. Run: `.venv/bin/python -m pytest`. Wall-clock is dominated by one
 test that renders 1000 components — rendering is quadratic and not this code's
 to fix (§12) — and three that spawn a subprocess to reach the stdout failure
 paths `CliRunner` cannot reproduce. The parser tests themselves are

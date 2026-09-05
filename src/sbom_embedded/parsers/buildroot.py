@@ -45,6 +45,13 @@ def find_manifest(root: Path) -> Path:
     file itself, because all three are things a person reasonably types.
     """
     if root.is_file():
+        if root.name != MANIFEST_NAME:
+            # `host-manifest.csv` is the file this guard exists for: same
+            # columns, same parser, but it lists the build host's tools rather
+            # than anything in the firmware.
+            raise BuildrootParseError(
+                f"{root} is not a {MANIFEST_NAME}; only the target manifest is read"
+            )
         return root
     for candidate in (root / MANIFEST_NAME, root / "legal-info" / MANIFEST_NAME):
         if candidate.is_file():

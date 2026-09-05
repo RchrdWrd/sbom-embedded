@@ -53,6 +53,10 @@ sbom-embedded ./build/tmp/deploy > sbom.json    # Yocto
 sbom-embedded ./output > sbom.json              # Buildroot
 ```
 
+A path to Buildroot's `manifest.csv` works too, if that is what you have to
+hand. `-o` replaces its destination atomically, so a failed run leaves the
+previous SBOM where it was rather than a truncated one.
+
 | Option | Meaning |
 | --- | --- |
 | `--format` | Output format. `cyclonedx` is the only one. |
@@ -269,7 +273,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-127 tests. Most of the wall-clock is one test that renders 1000 components
+133 tests. Most of the wall-clock is one test that renders 1000 components
 and three that spawn a subprocess; the parser tests are milliseconds. They run
 from fixture files under
 `tests/fixtures`, never from a live build. Every fixture is unmodified output
