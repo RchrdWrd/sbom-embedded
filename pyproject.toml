@@ -11,10 +11,29 @@ keywords = ["sbom", "cyclonedx", "yocto", "buildroot", "embedded", "cra"]
 dependencies = [
     # typer <0.16 does not cap click, and click 8.2 changed make_metavar();
     # the combination installs cleanly and then dies on every invocation.
+    # (typer 0.26 dropped click as a dependency outright, so the conflict this
+    # floor was chosen for no longer exists upstream -- but the floor is what
+    # the minimum-versions job pins and passes, so it stays.) Deliberately
+    # uncapped: typer is 0.x, so there is no major boundary to cap at, only a
+    # minor one that would need bumping monthly, and the surface cli.py uses
+    # fails loudly rather than silently.
     "typer>=0.16",
     # cyclonedx.contrib.{hash,license}.factories, which writer.py imports,
     # first exists in 11.6.0. A lower floor installs and then fails to import.
-    "cyclonedx-python-lib>=11.6",
+    #
+    # Capped at the next major because the documented entry points are
+    # `pipx run` and `uvx`, which resolve at run time -- so an uncapped
+    # dependency means users meet a breaking release before CI does. This
+    # library has shipped a major roughly every four to five months, v8 moved
+    # the `metadata.tools` chain writer.py calls, and contrib's own README
+    # says it is "not guaranteed to follow the same versioning rules" as the
+    # core. The dangerous break is not an ImportError but a serialisation
+    # change: a valid document that differs byte-for-byte from yesterday's for
+    # the same input, at exit 0. The upstream-canary CI job is what keeps this
+    # cap from silently going stale.
+    "cyclonedx-python-lib>=11.6,<12",
+    # Not capped: cyclonedx-python-lib already requires packageurl-python<2,
+    # so the bound exists in the graph either way.
     "packageurl-python>=0.15",
 ]
 

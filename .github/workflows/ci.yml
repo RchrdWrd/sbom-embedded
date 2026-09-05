@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nothing in this repo has to change for this to matter: the run exists to
+    # notice that *upstream* changed. Weekly is enough -- cyclonedx-python-lib
+    # ships roughly monthly. Deliberately off the hour; runs queued at :00 are
+    # the ones GitHub delays or drops.
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -11,7 +17,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only cancel superseded PR runs. A scheduled run and a push to main share
+  # this group, and cancelling either loses the signal it existed to produce.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -90,6 +98,75 @@ jobs:
         run: |
           sbom-embedded --version
           python -m pytest -q
+
+  upstream-canary:
+    # The mirror image of minimum-versions: that job pins the declared floor,
+    # this one deliberately steps past the declared cap.
+    #
+    # The rest of CI only runs when someone pushes, but `pipx run
+    # sbom-embedded` and `uvx sbom-embedded` resolve dependencies at *run*
+    # time. Without this job the first person to meet a breaking upstream
+    # release is a user, and nothing here would say so until the next PR.
+    #
+    # Skipped on pull_request on purpose: it fails for reasons that have
+    # nothing to do with the PR, and must never gate a merge.
+    name: upstream canary (${{ matrix.channel }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Newest released, ignoring the cap in pyproject -- this is what says
+          # when the cap has started costing users a real upgrade.
+          - channel: released
+            flags: ""
+          # Newest including pre-releases. A new major shows up here first,
+          # which is the point: the cap buys a migration window only if
+          # something opens it before 12.0.0 final lands.
+          - channel: prerelease
+            flags: "--pre"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the newest dependencies, ignoring the declared cap
+        run: |
+          python -m pip install --upgrade "pip>=25.1"
+          pip install --upgrade ${{ matrix.flags }} \
+            'cyclonedx-python-lib[json-validation]' typer packageurl-python pytest
+          pip install --no-deps -e .
+
+      - name: Record what actually resolved
+        # An SBOM tool that cannot say which library built its output has a
+        # provenance problem. This is the evidence in a failed run.
+        run: pip freeze
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Fail on a deprecation of anything we import
+        # Upstream deprecates an import path one major before removing it --
+        # cyclonedx.factory.license already carries @deprecated today. This is
+        # the warning shot; without it the first signal is an ImportError in
+        # someone's `pipx run`.
+        run: python -m pytest -q -W error::DeprecationWarning
+
+      - name: Run the CLI the way a user does
+        run: |
+          sbom-embedded tests/fixtures/buildroot-2026.08 -o /tmp/sbom.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          doc = json.loads(Path("/tmp/sbom.json").read_text())
+          assert doc["specVersion"] == "1.6", doc["specVersion"]
+          assert len(doc["components"]) == 44, len(doc["components"])
+          missing = [c["name"] for c in doc["components"] if not c.get("purl")]
+          assert not missing, missing
+          PY
 
   package:
     # Builds the distribution and runs the CLI from the installed wheel, in a

@@ -35,6 +35,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Test
+        # A PyPI release cannot be replaced, only yanked, and this workflow is
+        # triggered by a tag rather than by the CI run that tested the commit.
+        # Without this, a tag pushed to a red main publishes a broken release.
+        run: |
+          python -m pip install --upgrade "pip>=25.1"
+          pip install -e . --group dev
+          python -m pytest -q
+
       - name: Build
         run: |
           python -m pip install --upgrade pip build twine
