@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # The matrix is the point: pyproject claims requires-python >=3.11, and
+    # that claim is only worth making if something checks it.
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade "pip>=25.1"
+          pip install -e . --group dev
+
+      - name: Test
+        run: python -m pytest -v
+
+  quality:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade "pip>=25.1"
+          pip install -e . --group dev
+
+      - name: Ruff
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Mypy
+        run: mypy
+
+  minimum-versions:
+    # The declared lower bounds are a promise. This job is what makes it true:
+    # it installs exactly the floor of every runtime dependency and runs the
+    # tool. Both floors were wrong before this existed -- the code imports
+    # cyclonedx.contrib, which does not exist below 11.6, and typer below 0.16
+    # breaks against current click.
+    name: oldest supported dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install at the declared floors
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            'typer==0.16.0' \
+            'cyclonedx-python-lib[json-validation]==11.6.0' \
+            'packageurl-python==0.15.0' \
+            pytest
+          pip install --no-deps -e .
+
+      - name: Run
+        run: |
+          sbom-embedded --version
+          python -m pytest -q
+
+  package:
+    # Builds the distribution and runs the CLI from the installed wheel, in a
+    # separate environment from the source tree -- the path a `pipx run` user
+    # actually takes.
+    name: build and install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - name: Install the wheel and run it
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install dist/*.whl
+          /tmp/wheeltest/bin/sbom-embedded --version
+          cd /tmp
+          /tmp/wheeltest/bin/sbom-embedded \
+            "$GITHUB_WORKSPACE/tests/fixtures/buildroot-2026.08" -o /tmp/sbom.json
+          python - <<'PY'
+          import json
+          doc = json.load(open("/tmp/sbom.json"))
+          assert doc["specVersion"] == "1.6", doc["specVersion"]
+          components = doc["components"]
+          assert len(components) == 44, len(components)
+          missing = [c["name"] for c in components if not c.get("purl")]
+          assert not missing, missing
+          print(f"{len(components)} components, all with a purl")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
