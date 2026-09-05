@@ -129,8 +129,10 @@ is what made the build fit on a machine with 7 GB of free disk.
 Four files are kept, and each earns its place:
 
 * `images/qemux86-64/core-image-minimal-qemux86-64.rootfs.manifest` and the
-  `-20260902171159` copy it is a symlink to. Both are committed on purpose:
-  this is the real form of the duplicate a naive glob would count twice.
+  `-20260902171159` copy. In the build tree the first is a symlink to the
+  second; git stores both as ordinary files with identical content, which is
+  what the test needs — it is the content being the same, not the link, that
+  makes this the real form of the duplicate a naive glob would count twice.
 * `licenses/qemux86_64/core-image-minimal-qemux86-64.rootfs-20260902171159/license.manifest`
   -- 39 packages with licenses and recipe names.
 * the `image_license.manifest` beside it, which uses the other key set.
@@ -158,7 +160,8 @@ left the single most consequential transformation in the tool -- stripping the
 package revision and epoch so the SBOM does not depend on `PACKAGE_CLASSES` --
 covered only by synthetic tests. This file is what makes that real:
 
-* all 38 rows carry a `-r0` revision, which no rpm manifest ever has;
+* all 38 rows carry a packaging revision, which no rpm manifest ever has --
+  36 of them `-r0` and two `-r1`;
 * `netbase all 1:6.5-r0` carries a genuine epoch;
 * the architecture column is spelled `x86-64-v3` with hyphens, against
   `x86_64_v3` with underscores in the rpm build of the same image, and `all`

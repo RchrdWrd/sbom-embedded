@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-This project is at 0.1.0. Fixes go onto `main`; there are no maintained
-release branches yet.
+Only the latest release is supported. Fixes go onto `main` and ship in the
+next release; there are no maintained release branches.
 
 ## Reporting a vulnerability
 

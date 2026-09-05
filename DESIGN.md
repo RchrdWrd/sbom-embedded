@@ -7,8 +7,8 @@ self-contained: you should not need to read the source to follow it.
 Every checkable claim here has been verified against the source or by running
 the code. Where a statement comes from outside this repository it says so.
 
-Version described: 0.1.0. Python 3.11+. Runtime dependencies: `typer`,
-`cyclonedx-python-lib`, `packageurl-python`. 92 tests, ~1.5 s.
+Version described: 0.2.0. Python 3.11+. Runtime dependencies: `typer`,
+`cyclonedx-python-lib`, `packageurl-python`. 127 tests.
 
 ---
 
@@ -194,6 +194,42 @@ It also excludes `...rootfs-dbg.manifest`. Note the filter is **positional**:
 a hypothetical `<image>-dbg-<machine>.rootfs.manifest` would pass and be
 treated as a separate image.
 
+**License directories are ranked, not first-wins.** `licenses/` accumulates
+one `<image>-<machine>.rootfs-<DATETIME>/` per build exactly as `images/`
+accumulates timestamped manifests, and bitbake removes neither. Several
+directories therefore share one label and disagree. Keeping whichever sorted
+first, as the code did until 0.2.0, returned the **oldest** build every time,
+because `%Y%m%d%H%M%S` sorts chronologically.
+
+`_license_rank` orders them on four keys, in this order:
+
+1. **Depth.** The `licenses/<arch>/` level arrived in Yocto 4.3, so a tree
+   holding both layouts was upgraded in place and the deeper directory is the
+   one a newer bitbake wrote.
+2. **Untimestamped before timestamped.** The untimestamped name is the symlink,
+   which is the build system's own statement of which image is current — so it
+   beats even a *newer* timestamped directory, which is what a build that wrote
+   its licenses and then failed leaves behind.
+3. **The DATETIME**, taken from the directory's own name or, when it has none,
+   from the name it resolves to. Plain string order.
+4. **Modification time.** Only reachable when two directories at one depth are
+   both untimestamped and neither resolves to a stamped name — a copy that
+   flattened the symlinks, after an `SSTATE_PKGARCH` rename. Nothing is left in
+   the names at that point, and mtime is at least a signal from the build
+   rather than alphabetical order over arch directories.
+
+Four layouts hit the old rule: a rebuild whose symlink a tar or rsync dropped,
+a pre-4.3 depth-1 directory left beside a current depth-2 one, a renamed
+`SSTATE_PKGARCH` directory that sorts earlier, and two untimestamped symlinks
+in different arch directories. All four have tests.
+
+**Both Yocto files are read as `utf-8-sig`,** for the reason §6 gives for the
+Buildroot CSV. A BOM decodes to U+FEFF, which is category `Cf` rather than
+whitespace, so `strip()` keeps it: on the image path it became part of the
+first package's name and produced a purl nothing resolves, at exit 0; on the
+license path it hid the `PACKAGE NAME` key and produced a confidently wrong
+diagnosis.
+
 ---
 
 ## 5. Input format 2 — Yocto license manifest
@@ -223,6 +259,9 @@ not depend on it. The only enforced invariants are:
 * every line contains a colon (split on the **first** colon, so values may
   contain colons);
 * `PACKAGE NAME` is present and non-empty;
+* `PACKAGE NAME` has a purl form — `has_purl_form()`, §3. Blank is not the
+  only unusable name: packageurl reduces one made only of slashes to nothing
+  and then raises a `TypeError` naming neither the file nor the block;
 * no key appears twice within one block.
 
 `PACKAGE VERSION`, `RECIPE NAME` and `LICENSE` are each optional and order is
@@ -277,10 +316,12 @@ the image-manifest fixtures): `glibc`/`libc6`, `zlib`/`libz1`,
 those pairs are illustrative, not measured here.
 
 > **Provenance note.** The figure "13 of 57 packages disagree" comes from
-> external research on a third-party build and **cannot be reproduced from
-> these fixtures** — no build in `tests/fixtures/` carries both manifest
-> kinds. Do not treat it, or the claim that the two files enumerate equal
-> counts, as measured here.
+> external research on a third-party build and is not measured here. The
+> disagreement itself is: `yocto-6.0.2-live` carries both manifest kinds from
+> one build, and `test_the_two_manifests_disagree_about_package_names` pins
+> the numbers — 37 package names in the image manifest, 39 in the license
+> manifest, 11 of the 37 with no counterpart on the other side. The two files
+> do **not** enumerate equal counts.
 
 There is a second obstacle: the license manifest writes `PV` (`2.43+git`)
 while the image manifest writes `PKGV` (`2.43+git0+e9517114ac`), so versions
@@ -351,15 +392,32 @@ verbatim. They are the decisions most worth challenging.
 ### 7.1 Yocto version: strip epoch and `-rN` revision
 
 `normalize_version()` removes a leading `<digits>:` epoch and a trailing
-`-r<digits>` revision. Applied on **both** Yocto paths.
+`-r<N>[.<N>...]` revision. Applied on **both** Yocto paths.
 
 **Why:** the same image built with `PACKAGE_CLASSES=package_rpm` and
 `package_ipk` otherwise produces different SBOMs — `1.36.1` versus
 `1.36.1-r0`. `PKGR` is Yocto's packaging revision and `PKGE` its epoch;
 neither is part of the upstream version any CVE feed knows.
 
-**Kept on purpose:** the `+git0+<sha>` suffix. That is part of `PKGV` and
-identifies the actual source revision.
+**`PKGR` is not always `r<N>`.** `bitbake.conf` defines
+`PKGR ?= "${PR}${EXTENDPRAUTO}"`, and `EXTENDPRAUTO` expands to `.${PRAUTO}`
+whenever `PRSERV_HOST` is set — so with a PR service `r0` becomes `r0.1`,
+`r0.2` and so on, and the dev manual's own AUTOINC example ships
+`hello-world-git_1.0+git0+b6558dd387-r0.0_armv7a-neon.ipk`. A local PR server
+chained to an upstream one (`PRSERV_UPSTREAM`) mints a dotted subvalue of its
+own, giving `r0.3.0`; bitbake's `increase_revision()` documents arbitrary
+depth. The same shape arrives with no PR service at all through the `INC_PR`
+idiom, where a `.inc` sets `INC_PR = "r15"` and the recipe sets
+`PR = "${INC_PR}.0"`.
+
+A PR service is the normal setup for a shared package feed, so this is not an
+exotic configuration. Until 0.2.0 the regex matched only `-r<digits>`, which
+left those revisions in the version and reintroduced exactly the
+backend-dependent SBOM this section exists to prevent.
+
+**Kept on purpose:** the `+git<AUTOINC>+<srcrev>` suffix. That is part of
+`PKGV` and identifies the actual source revision. (`AUTOINC` is not always
+`0` — the dev manual's second example is `+git1+dd2f5c3565`.)
 
 **Verified on real data, not only asserted.** `yocto-6.0.2-live` and
 `yocto-6.0.2-ipk` are the same core-image-minimal from the same tree, packaged
@@ -369,10 +427,32 @@ the two images share come out byte-identical. The one purl that differs,
 `util-linux-flock`, is a genuine difference in image content -- the ipk image
 installs 38 packages and the rpm image 37.
 
-**Known risk:** an upstream version legitimately ending in `-r<digits>` would
-be truncated. `PKGR` is always `r<N>` and the regex requires digits after the
-`r` (so `1.2-rc1` is safe), but this is a heuristic. On the license-manifest
-path the justification does not even apply — see §5.
+**Known risk:** an upstream version legitimately ending in
+`-r<N>[.<N>...]` would be truncated. `PR` is a free-form string with no QA
+check on its shape, so no pattern can be exactly right; this is a heuristic,
+and widening it to accept dotted revisions widens the heuristic too. The
+guards that keep it narrow are the `$` anchor and the required digit after the
+`r`: `1.2-rc1`, `1.0-r1a`, `1.0-r` and `1.0-r0.` are all left alone, and only
+the trailing `PKGR` is removed even when `PKGV` itself ends in a revision
+(`1.2-r3.4-r0` → `1.2-r3.4`).
+
+Measured exposure: across 3,545 recipes in current `openembedded-core` and
+`meta-openembedded`, no filename-derived `PV` ends in `-r<digits>` under
+either the old regex or the new one, and only 19 contain a hyphen at all
+(`2.1-3`, `1.2.3-alt1`, `0.3-beta15`, `6.04-pre2`, `1.3-20260721` and
+similar) — none of which either regex touches. The new regex is also a no-op
+on all 159 distinct version strings across every manifest in
+`tests/fixtures/`, so widening it changed no existing assertion.
+
+Legacy `PR` forms that are not `r<N>[.<N>...]` — OE-classic's
+`PR:append = "+gitr${SRCREV}"`, or `PR = "${MACHINE_KERNEL_PR}"` — are left in
+the version rather than guessed at. A visible unstripped revision is the
+correct failure here; a mis-truncated version is not.
+
+On the license-manifest path the justification does not even apply — see §5.
+There the value is `PV`, written by `write_license_files()` in
+`license_image.bbclass`, which carries neither `PKGE` nor `PKGR`, so any match
+at all is a false positive.
 
 ### 7.2 Package architecture is not put in the purl
 
@@ -462,6 +542,25 @@ raises — including when the two are found at different probe levels (a Yocto
 deploy at `.` and a Buildroot manifest at `output/legal-info`). There is no
 override flag; the recourse is to point deeper.
 
+**An unreadable directory is not an empty one.** `Path.glob` reports a
+directory it may not read as no matches rather than as an error, so evidence
+sitting right there looks absent. Before reporting that a path is neither
+kind of build directory, `detect()` walks four levels — enough to list every
+directory the deepest evidence pattern, `licenses/<arch>/<image>/`, passes
+through — and names any it could not open instead.
+
+The same swallow on the parser side was worse: an unreadable
+`licenses/<arch>/` made `find_license_manifests()` return nothing, `parse()`
+fall back to the image manifest, and the tool emit a complete-looking SBOM
+with no licenses and no recipe names at exit 0. That check now lives in
+`find_manifests()`, where the fallback is actually decided: it fires when any
+image is left with only its image manifest, and it ignores a blocked directory
+whose label was already read successfully, so a stale unreadable rebuild
+directory does not fail a good deploy. Placing it in `find_license_manifests()`
+was not enough — gated on "no license manifest anywhere", one image's readable
+directory masked another image's blocked one, which is the ordinary
+multi-image layout.
+
 ---
 
 ## 9. CycloneDX output
@@ -492,13 +591,30 @@ the parsers convert them first (`normalize_version(...) or None`,
 `_NO_VERSION`, `_NO_LICENSE`). The invariant is owned by the parsers, not by
 `writer.py`.
 
-**bom-ref collisions are resolved silently by the library.** `bom_ref` is set
-to the purl string, but `bom.components` is a sorted set: two byte-identical
-components collapse into one with no warning, and two components sharing a
-purl but differing elsewhere both survive with one reassigned a generated
-`BomRef.<n>` — and only that one keeps its root dependency edge. Both outcomes
-are schema-valid, so validation will never catch it. No fixture triggers this
-(all purls are unique), and nothing asserts it.
+**bom-ref collisions are resolved before the library sees them.** `bom_ref` is
+the purl, and CycloneDX 1.6 requires every bom-ref to be unique within a
+document — a rule that lives in prose inside the JSON schema's own
+`description` and is not enforced by any schema construct. Left to the
+library, two components sharing a purl both survive with one reassigned a
+generated `BomRef.<n>`: a value that changes on every run, and that gets no
+entry in `dependencies` at all. Schema-valid, non-reproducible, and one
+component short of a graph.
+
+`resolve_duplicates()` in `writer.py` settles it first, and splits the case in
+two. Repeats that agree in every field are collapsed to one component and
+reported on stderr — the image holds one of that package, and emitting it
+twice would assert otherwise. Repeats that disagree raise
+`DuplicateBomRefError`, which `cli.py` turns into `error: <message>` and exit
+1: nothing here can say which record is right, and choosing one would put
+invented data into a compliance document. The root component's ref is checked
+against the same namespace, because `--name` puts it under the user's control.
+
+No manifest a build system writes can contain a duplicate — bitbake keys both
+manifests on package name in a dict, and Buildroot appends one row per package
+per invocation. They come from a stale `legal-info/` that a second
+`make <pkg>-legal-info` appended to, from manifests concatenated by hand, or
+from an edited file. No fixture triggers it; `tests/test_writer.py` constructs
+all three cases.
 
 ### Document structure
 
@@ -538,6 +654,17 @@ sbom-embedded PATH [--format cyclonedx] [--image NAME] [--name NAME]
 * The SBOM goes to **stdout** via `sys.stdout.write`, with a trailing newline,
   so `> sbom.json` produces a well-formed text file. With `-o`, stdout stays
   empty and a progress line goes to stderr.
+* That write is flushed explicitly and guarded, like the `-o` one. Without the
+  flush a failure surfaced only when CPython flushed at interpreter shutdown,
+  after the command had already returned — exit **120** with `Exception
+  ignored while flushing sys.stdout`, and a truncated redirect file. A closed
+  descriptor produced a traceback. Both are now `error: <message>` and exit 1.
+* **Exit 141** (128 + SIGPIPE) means the reader of a pipe went away —
+  `sbom-embedded ... | head`. Nothing goes to stderr. This is deliberately
+  not exit 1: that code is reserved for `error: <message>`, and typer's
+  default handling turned a broken pipe into a silent exit 1 that was
+  indistinguishable from a real failure, and only fired once the document
+  outgrew the pipe buffer.
 * **Two different error contracts:**
   * Detection and parse errors are caught, printed to stderr as
     `error: <message>`, and exit **1**. No traceback. Output-file write
@@ -555,11 +682,12 @@ sbom-embedded PATH [--format cyclonedx] [--image NAME] [--name NAME]
 * `--product-version` sets `metadata.component.version`. Without it the field
   is absent from the document — not `0.0.0`, not `unknown`, not a date. No
   manifest this tool reads carries a product version.
-* `--version` prints `sbom-embedded 0.1.0` to stdout and exits 0. It is eager,
+* `--version` prints `sbom-embedded <version>` to stdout and exits 0. It is eager,
   so it wins even with an invalid PATH. (Not to be confused with
   `--product-version`.)
-* The `wrote N components` line counts the parsed list, not the rendered
-  document — if the writer deduplicated anything, it would over-count.
+* The `wrote N components` line counts what the document holds: `cli.py`
+  resolves duplicates before rendering, so the count cannot drift from the
+  component array.
 
 ### Image selection
 
@@ -589,10 +717,15 @@ manifests exist, `--image` takes the full label.
 
 ## 11. Testing
 
-92 tests, ~1.5 s. Run: `.venv/bin/python -m pytest`.
+127 tests. Run: `.venv/bin/python -m pytest`. Wall-clock is dominated by one
+test that renders 1000 components — rendering is quadratic and not this code's
+to fix (§12) — and three that spawn a subprocess to reach the stdout failure
+paths `CliRunner` cannot reproduce. The parser tests themselves are
+milliseconds. A figure is deliberately not quoted here: the previous one was
+twenty times under, and the number moves with the machine.
 
-**Fixtures are unmodified output from real builds** — 12 manifest files across
-7 fixture directories, laid out as the directory a user would point the CLI
+**Fixtures are unmodified output from real builds** — 13 manifest files across
+8 fixture directories, laid out as the directory a user would point the CLI
 at. No generated or hand-written manifest is used as a positive fixture,
 because the format details are exactly what a parser gets wrong from memory.
 `tests/fixtures/PROVENANCE.md` records the source URL, licence and purpose of
@@ -681,6 +814,18 @@ fixture.
    path where its justification does not hold (§5, §7.1).
 9. **`--image` selection by short name needs an image manifest present**
    (§10).
+10. **Rendering is quadratic in the number of packages, and the constant is
+    not small.** `output_as_string()` calls `Bom.validate()`, which calls
+    `Bom.register_dependency()` once per component; that method does a linear
+    scan of the whole dependency set each time. Measured here: 500 packages in
+    about 2.5 s, 1000 in 11 s, 2000 in 22 s, 4000 in 54 s. The 44-package
+    Buildroot build and the 39-package Yocto image the README quotes really do
+    take about 0.09 s, but a `core-image-sato`-sized image will not. Building
+    the dependency edges directly rather than through `register_dependency`
+    (§9) removes one of the two quadratic passes; the one inside `validate()`
+    has no public way to skip it. This is upstream behaviour, not a choice
+    made here, and the code comment in `writer.py` claimed otherwise until
+    0.2.0.
 
 ---
 
@@ -689,9 +834,10 @@ fixture.
 Ranked by where a defect would be most damaging and least visible.
 
 1. **`normalize_version()`** — the only lossy transformation applied to
-   version strings, and it runs on both Yocto paths. `1.2-rc1`,
-   `2.39+git0+662516aca8` and `2:1.36.1-r12` are covered by tests; what is
-   not?
+   version strings, and it runs on both Yocto paths, including the one where
+   the justification does not apply (§5, §7.1). It now strips dotted
+   revisions, so the heuristic is wider than it was. `PR` is a free-form
+   string with no QA check; what shape is still missing?
 2. **`parse_license_manifest()` block splitting** — a dict per block means any
    failure to separate two records drops a package with exit 0. The
    blank-line split and the duplicate-key guard are the two defences; both
@@ -701,20 +847,29 @@ Ranked by where a defect would be most damaging and least visible.
    synthetic test (`test_an_empty_column_is_not_mistaken_for_a_malformed_line`)
    covers both empty-arch and empty-version in two lines.
 4. **Manifest discovery uses two different mechanisms.** Image manifests are
-   filtered by whether the stem ends in `-<machine>` (no dedup dict at all);
-   license manifests are deduplicated by label collision. If either were
-   wrong, packages would be silently doubled or dropped. Both now have
-   negative-case tests; check they hold for layouts other than the fixtures'.
-5. **`bom-ref` uniqueness** — §9 describes what the library does on a
-   collision. The mapping and referential integrity are now asserted, but
-   nothing constructs a collision, so that path is still unexercised.
+   filtered by whether the stem ends in `-<machine>`; license manifests are
+   deduplicated by label and then ranked, symlink first and newest timestamp
+   after (§4). The ranking is new, and it exists because first-wins returned
+   the *oldest* build's package list whenever a deploy had been built twice —
+   silently, at exit 0. Check the rank against layouts the fixtures do not
+   cover.
+5. **Directory reads that can fail rather than come back empty.** `Path.glob`
+   swallows `PermissionError`. Two places now ask explicitly; a third that
+   does not would reintroduce the same silent fallback.
 6. **`detect()` probe order** — first match wins, and `.` is tried first.
    Consider a build tree where a parent directory coincidentally matches.
 7. **Placeholder sets in `buildroot.py`** — `_NO_VERSION = {"", "custom"}` and
    `_NO_LICENSE = {"", "unknown"}` are exact, case-sensitive, closed sets. Are
    there other placeholders in a target manifest?
-8. **The `properties` escape hatch** — is a generic `dict[str, str]` the right
-   shape, or should `recipe` be a first-class field?
-9. **The `else` arm in `cli.py`** — a `BuildSystem` member added without a
-   parser now raises rather than falling through to Buildroot. Confirm no
-   other dispatch has the same shape.
+8. **`resolve_duplicates()`'s identity rule** (§9) — two components are "the
+   same record" when every `Component` field matches. That comparison happens
+   *after* normalisation, so two rows differing only by packaging revision
+   compare equal. That is the right answer for the SBOM and the wrong story
+   about the file; the warning is worded not to claim the rows were identical.
+9. **`make_purl()` defers to packageurl for what is representable.**
+   `has_purl_form()` asks the library rather than reimplementing its rules, so
+   it cannot drift — but it also inherits whatever the library decides. A
+   version of packageurl that normalises more aggressively would silently
+   change which names are accepted.
+10. **The `properties` escape hatch** — is a generic `dict[str, str]` the right
+    shape, or should `recipe` be a first-class field?

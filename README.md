@@ -235,10 +235,17 @@ the 37 names have no counterpart on the other side — `libc6` against `glibc`,
   Nothing is guessed at or dropped.
 * **No supplier and no hashes.** Neither build system records a supplier or a
   per-package hash, so those fields are absent rather than invented.
+* **Large images are slow.** The CycloneDX library re-derives the dependency
+  graph while serialising, at a cost that grows with the square of the package
+  count: the 44-package build above renders in 0.09 s, but 2000 packages take
+  around 20 seconds and 4000 around a minute. The parsing is milliseconds
+  either way.
 * **The dependency graph is flat.** Every package hangs off the image. The
-  manifests read do not carry inter-package dependencies.
-* **Buildroot `SOURCE ARCHIVE`, `SOURCE SITE` and `LICENSE FILES` are not
-  emitted.**
+  Yocto manifests carry no inter-package dependencies. Buildroot's
+  `DEPENDENCIES WITH LICENSES` column does — it is the one place real edges
+  are available — and it is read past rather than emitted.
+* **Buildroot `SOURCE ARCHIVE`, `SOURCE SITE`, `LICENSE FILES` and
+  `DEPENDENCIES WITH LICENSES` are not emitted.**
 * **The product name and version are yours to supply.** A Buildroot manifest
   carries no product identity, so the root component is named `buildroot`
   unless you pass `--name`, and has no version unless you pass
@@ -262,7 +269,9 @@ python3 -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-92 tests, a second or two. They run from fixture files under
+127 tests. Most of the wall-clock is one test that renders 1000 components
+and three that spawn a subprocess; the parser tests are milliseconds. They run
+from fixture files under
 `tests/fixtures`, never from a live build. Every fixture is unmodified output
 from a real Yocto or Buildroot build —
 [PROVENANCE.md](https://github.com/RchrdWrd/sbom-embedded/blob/main/tests/fixtures/PROVENANCE.md) records where each came from and
