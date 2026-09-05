@@ -1,6 +1,6 @@
 [project]
 name = "sbom-embedded"
-version = "0.1.1"
+version = "0.2.0"
 description = "CycloneDX SBOM generator for Yocto and Buildroot build output"
 readme = "README.md"
 authors = [{ name = "Richard Ward", email = "richard.daily.ward@gmail.com" }]

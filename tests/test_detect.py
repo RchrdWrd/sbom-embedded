@@ -103,3 +103,40 @@ def test_a_complete_buildroot_output_tree_is_not_mistaken_for_yocto(tmp_path):
         found = detect(start)
         assert found.system is BuildSystem.BUILDROOT, start
         assert found.root == output / "legal-info", start
+
+
+def test_a_directory_we_cannot_read_is_named_rather_than_called_empty(tmp_path):
+    # An unreadable directory looks exactly like an empty one to glob, so the
+    # generic message sent the user hunting for files that were sitting there.
+    machine = tmp_path / "images" / "qemux86-64"
+    machine.mkdir(parents=True)
+    (machine / "core-image-minimal-qemux86-64.rootfs.manifest").write_text(
+        "busybox core2-64 1.36.1\n"
+    )
+    machine.chmod(0o000)
+    try:
+        with pytest.raises(DetectionError) as exc:
+            detect(tmp_path)
+    finally:
+        machine.chmod(0o755)
+    assert "could not be read" in str(exc.value)
+    assert str(machine) in str(exc.value)
+
+
+def test_a_blocked_license_image_directory_is_named_too(tmp_path):
+    # The deepest evidence pattern is licenses/<arch>/<image>/license.manifest,
+    # so ruling it out needs four directory levels listable. Checking three
+    # left the current Yocto layout reporting "not a build directory at all".
+    directory = (
+        tmp_path / "licenses" / "x86_64" / "core-image-minimal-qemux86-64.rootfs"
+    )
+    directory.mkdir(parents=True)
+    (directory / "license.manifest").write_text("PACKAGE NAME: busybox\n")
+    directory.chmod(0o000)
+    try:
+        with pytest.raises(DetectionError) as exc:
+            detect(tmp_path)
+    finally:
+        directory.chmod(0o755)
+    assert "could not be read" in str(exc.value)
+    assert str(directory) in str(exc.value)

@@ -97,14 +97,63 @@ def test_ipk_and_deb_revisions_and_epochs_are_stripped():
     assert normalize_version("1.2-rc1") == "1.2-rc1"
 
 
+def test_a_pr_service_revision_is_stripped_like_a_plain_one():
+    # PKGR is not "r<N>". bitbake.conf defines PKGR ?= "${PR}${EXTENDPRAUTO}",
+    # and EXTENDPRAUTO is ".${PRAUTO}" whenever PRSERV_HOST is set, so the
+    # dev-manual's own example packages are "...-r0.0" and "...-r0.1". A PR
+    # service is the normal setup for a shared package feed, and leaving those
+    # revisions in the version would reintroduce exactly the backend-dependent
+    # SBOM this normalisation exists to prevent.
+    from sbom_embedded.parsers.yocto import normalize_version
+
+    assert normalize_version("1.0+git0+b6558dd387-r0.0") == "1.0+git0+b6558dd387"
+    assert normalize_version("1.0+git1+dd2f5c3565-r0.1") == "1.0+git1+dd2f5c3565"
+    # INC_PR: a .inc sets INC_PR = "r15" and the recipe PR = "${INC_PR}.0".
+    # No PR service involved -- the dotted revision arrives on its own.
+    assert normalize_version("3.3.2-r15.0") == "3.3.2"
+    # A local PR server chained to an upstream one mints a dotted subvalue, and
+    # bitbake's increase_revision() documents arbitrary depth ("1.2.3").
+    assert normalize_version("1.36.1-r0.3.0") == "1.36.1"
+    assert normalize_version("1.0-r0.1.2.3") == "1.0"
+    # Epoch and a PR-service revision together.
+    assert normalize_version("1:6.5-r0.2") == "6.5"
+
+
+def test_a_version_that_merely_resembles_a_revision_is_left_alone():
+    # The transform is lossy and runs on the license-manifest path too, where
+    # the value is PV and carries no PKGR at all -- so every match there is a
+    # false positive. These are the guards that keep it narrow: a digit is
+    # required after the "r", and the match is anchored to the end.
+    from sbom_embedded.parsers.yocto import normalize_version
+
+    assert normalize_version("1.0-r1a") == "1.0-r1a"
+    assert normalize_version("1.0-r") == "1.0-r"
+    assert normalize_version("1.0-r0.") == "1.0-r0."
+    # Only the trailing PKGR goes, even when PKGV itself ends in a revision.
+    assert normalize_version("1.2-r3.4-r0") == "1.2-r3.4"
+    # package_rpm.bbclass rewrites PKGV's "-" to "+", so this is what an rpm
+    # manifest shows for a PKGV of "1.2-r1". Nothing to strip.
+    assert normalize_version("1.2+r1") == "1.2+r1"
+    # A legacy PR that is not "r<N>[.<N>...]" is carried through rather than
+    # guessed at: PR:append = "+gitr${SRCREV}" was an OE-classic idiom.
+    assert normalize_version("1.0-r0+gitr1a2b3c") == "1.0-r0+gitr1a2b3c"
+    # Real recipe versions from current OE layers that contain a hyphen.
+    for pv in ("2.1-3", "1.2.3-alt1", "0.3-beta15", "6.04-pre2", "1.3-20260721"):
+        assert normalize_version(pv) == pv
+
+
 def test_the_same_image_gives_the_same_purls_on_any_package_backend(tmp_path):
     rpm = tmp_path / "rpm.manifest"
     ipk = tmp_path / "ipk.manifest"
+    # The same image again, built with a PR service configured: every revision
+    # gains a ".<PRAUTO>" suffix. The purls must still not move.
+    prserv = tmp_path / "prserv.manifest"
     rpm.write_text("busybox core2_64 1.36.1\nlibz1 core2_64 1.3.1\n")
     ipk.write_text("busybox core2-64 1.36.1-r0\nlibz1 core2-64 1:1.3.1-r0\n")
-    assert [c.purl for c in parse_image_manifest(rpm)] == [
-        c.purl for c in parse_image_manifest(ipk)
-    ]
+    prserv.write_text("busybox core2-64 1.36.1-r0.4\nlibz1 core2-64 1:1.3.1-r0.12\n")
+    expected = [c.purl for c in parse_image_manifest(rpm)]
+    assert [c.purl for c in parse_image_manifest(ipk)] == expected
+    assert [c.purl for c in parse_image_manifest(prserv)] == expected
 
 
 def test_an_empty_column_is_not_mistaken_for_a_malformed_line(tmp_path):
@@ -215,6 +264,135 @@ def test_the_timestamped_directory_and_its_symlink_count_once(fixtures, tmp_path
 
     components, _ = parse(tmp_path)
     assert len(components) == 37
+
+
+def _license_block(name, version):
+    return (
+        f"PACKAGE NAME: {name}\n"
+        f"PACKAGE VERSION: {version}\n"
+        f"RECIPE NAME: {name}\n"
+        "LICENSE: MIT\n\n"
+    )
+
+
+def _license_dir(root, *parts):
+    directory = root.joinpath("licenses", *parts)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def test_a_rebuilt_deploy_reports_the_current_build_not_the_first(tmp_path):
+    # bitbake never removes an old licenses/<image>-<machine>.rootfs-<DATETIME>
+    # directory, so building twice leaves two that disagree. Keying on the
+    # label and keeping whichever sorted first returned the OLDEST, because
+    # %Y%m%d%H%M%S sorts chronologically -- a complete, plausible, schema-valid
+    # package list describing firmware that is no longer on disk.
+    for stamp, blocks in (
+        ("20260101000000", _license_block("openssl", "3.0.0")),
+        (
+            "20260902171159",
+            _license_block("openssl", "3.5.4") + _license_block("busybox", "1.37.0"),
+        ),
+    ):
+        directory = _license_dir(
+            tmp_path, "qemux86_64", f"core-image-minimal-qemux86-64.rootfs-{stamp}"
+        )
+        (directory / "license.manifest").write_text(blocks)
+
+    components, _ = parse(tmp_path)
+    assert sorted((c.name, c.version) for c in components) == [
+        ("busybox", "1.37.0"),
+        ("openssl", "3.5.4"),
+    ]
+
+
+def test_a_pre_4_3_license_directory_does_not_outrank_a_newer_one(tmp_path):
+    # The arch level was added in 4.3. Upgrading poky in place without wiping
+    # tmp/deploy leaves the old depth-1 directory beside the new depth-2 one,
+    # and the depth-1 glob runs first -- so the pre-upgrade package list won
+    # regardless of its timestamp.
+    old = _license_dir(tmp_path, "core-image-minimal-qemux86-64-20240101000000")
+    (old / "license.manifest").write_text(_license_block("openssl", "1.1.1"))
+    new = _license_dir(
+        tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    )
+    (new / "license.manifest").write_text(_license_block("openssl", "3.5.4"))
+
+    components, _ = parse(tmp_path)
+    assert [(c.name, c.version) for c in components] == [("openssl", "3.5.4")]
+
+
+def test_a_renamed_arch_directory_does_not_resurrect_an_old_build(tmp_path):
+    # SSTATE_PKGARCH can change between builds, leaving two arch directories.
+    # "core2-64" sorts before "qemux86_64", so the old build won on name order.
+    old = _license_dir(
+        tmp_path, "core2-64", "core-image-minimal-qemux86-64.rootfs-20240101000000"
+    )
+    (old / "license.manifest").write_text(_license_block("openssl", "1.1.1w"))
+    new = _license_dir(
+        tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    )
+    (new / "license.manifest").write_text(_license_block("openssl", "3.5.4"))
+
+    components, _ = parse(tmp_path)
+    assert [(c.name, c.version) for c in components] == [("openssl", "3.5.4")]
+
+
+def test_a_pre_4_3_symlink_does_not_outrank_a_current_layout(tmp_path):
+    # Pre-4.3 bitbake wrote a stable licenses/<image>-<machine>/ symlink too.
+    # After an in-place upgrade both it and the current
+    # licenses/<arch>/<image>-<machine>.rootfs/ are untimestamped, so ranking
+    # on the timestamp alone ties them -- and the depth-1 glob runs first, so
+    # the pre-upgrade package list won. The arch level only exists from 4.3, so
+    # the deeper directory is the one a newer bitbake wrote.
+    old = _license_dir(tmp_path, "core-image-minimal-qemux86-64")
+    (old / "license.manifest").write_text(_license_block("openssl", "1.1.1"))
+    new = _license_dir(tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs")
+    (new / "license.manifest").write_text(_license_block("openssl", "3.5.4"))
+
+    components, _ = parse(tmp_path)
+    assert [(c.name, c.version) for c in components] == [("openssl", "3.5.4")]
+
+
+def test_an_unreadable_image_directory_is_not_silently_skipped(tmp_path):
+    # The 4.3+ manifest sits at licenses/<arch>/<image-dir>/, so it is the
+    # <image-dir> level that has to be listable. Checking only two levels down
+    # left the same silent fallback one directory further in.
+    images = tmp_path / "images" / "qemux86-64"
+    images.mkdir(parents=True)
+    (images / "core-image-minimal-qemux86-64.rootfs.manifest").write_text(
+        "busybox core2-64 1.36.1\n"
+    )
+    directory = _license_dir(
+        tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    )
+    (directory / "license.manifest").write_text(_license_block("busybox", "1.36.1"))
+
+    directory.chmod(0o000)
+    try:
+        with pytest.raises(YoctoParseError, match="could not be read"):
+            parse(tmp_path)
+    finally:
+        directory.chmod(0o755)
+
+
+def test_the_symlink_wins_over_a_newer_timestamped_directory(tmp_path):
+    # The symlink is the build system's own statement of which image is
+    # current: it points at the last build that finished. A newer directory
+    # left by a build that failed after writing licenses must not displace it.
+    stale = _license_dir(
+        tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    )
+    (stale / "license.manifest").write_text(_license_block("openssl", "9.9.9"))
+    good = _license_dir(
+        tmp_path, "qemux86_64", "core-image-minimal-qemux86-64.rootfs-20260101000000"
+    )
+    (good / "license.manifest").write_text(_license_block("openssl", "3.5.4"))
+    link = good.parent / "core-image-minimal-qemux86-64.rootfs"
+    link.symlink_to(good.name, target_is_directory=True)
+
+    components, _ = parse(tmp_path)
+    assert [(c.name, c.version) for c in components] == [("openssl", "3.5.4")]
 
 
 def test_a_block_line_without_a_key_is_reported(tmp_path):
@@ -474,3 +652,155 @@ def test_the_raw_ipk_manifest_really_does_carry_revisions_and_an_epoch(fixtures)
     assert any(version.startswith("1:") for _, _, version in rows)
     # Hyphenated tune arch is the ipk/deb spelling; rpm writes underscores.
     assert any(arch == "x86-64-v3" for _, arch, _ in rows)
+
+
+def test_a_byte_order_mark_does_not_become_part_of_the_first_package_name(tmp_path):
+    # U+FEFF is category Cf, not whitespace, so str.strip() leaves it and the
+    # emptiness guard passes: the first package came out named "\ufeffbase-files"
+    # with a purl nothing can resolve, at exit 0. buildroot.py already read
+    # utf-8-sig for exactly this reason; the Yocto paths did not.
+    manifest = tmp_path / "img-qemux86-64.manifest"
+    manifest.write_bytes(
+        b"\xef\xbb\xbfbase-files qemux86_64 3.0.14\nbusybox x86_64 1.37.0\n"
+    )
+    assert [c.name for c in parse_image_manifest(manifest)] == ["base-files", "busybox"]
+
+
+def test_a_byte_order_mark_does_not_hide_the_package_name_key(tmp_path):
+    # The same BOM turned "PACKAGE NAME" into "\ufeffPACKAGE NAME", which failed
+    # the key check and produced an actively wrong diagnosis: the file was
+    # reported as an image_license.manifest, which it is not.
+    manifest = tmp_path / "license.manifest"
+    manifest.write_bytes(
+        b"\xef\xbb\xbfPACKAGE NAME: libcrypto\nPACKAGE VERSION: 3.3.2\n"
+    )
+    components = parse_license_manifest(manifest)
+    assert [(c.name, c.version) for c in components] == [("libcrypto", "3.3.2")]
+
+
+def test_an_enormous_block_key_does_not_become_an_enormous_error(tmp_path):
+    # _excerpt() bounds every other interpolation in this file; these two paths
+    # bypassed it and echoed megabytes of input back to stderr.
+    manifest = tmp_path / "license.manifest"
+    manifest.write_text("X" * 200_000 + ": value\n")
+    with pytest.raises(YoctoParseError) as exc:
+        parse_license_manifest(manifest)
+    assert len(str(exc.value)) < 1_000
+
+
+def test_an_enormous_duplicate_key_does_not_become_an_enormous_error(tmp_path):
+    manifest = tmp_path / "license.manifest"
+    key = "K" * 200_000
+    manifest.write_text(f"PACKAGE NAME: a\n{key}: 1\n{key}: 2\n")
+    with pytest.raises(YoctoParseError) as exc:
+        parse_license_manifest(manifest)
+    assert len(str(exc.value)) < 1_000
+
+
+def test_a_license_directory_that_cannot_be_read_is_not_silently_skipped(tmp_path):
+    # Path.glob reports a directory it may not read as no matches, so discovery
+    # found no license manifest, fell back to the image manifest, and emitted a
+    # complete-looking SBOM with no licenses and no recipe names at exit 0.
+    images = tmp_path / "images" / "qemux86-64"
+    images.mkdir(parents=True)
+    (images / "core-image-minimal-qemux86-64.rootfs.manifest").write_text(
+        "busybox core2-64 1.36.1\n"
+    )
+    arch = tmp_path / "licenses" / "qemux86_64"
+    directory = arch / "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    directory.mkdir(parents=True)
+    (directory / "license.manifest").write_text(_license_block("busybox", "1.36.1"))
+
+    arch.chmod(0o000)
+    try:
+        with pytest.raises(YoctoParseError, match="could not be read"):
+            parse(tmp_path)
+    finally:
+        arch.chmod(0o755)
+
+
+def test_a_license_manifest_name_with_no_purl_form_is_rejected(tmp_path):
+    # The image-manifest branch of this guard has a test; this one did not, so
+    # deleting it restored the rich traceback on the license path alone.
+    manifest = tmp_path / "license.manifest"
+    manifest.write_text("PACKAGE NAME: /\nPACKAGE VERSION: 1.0\n")
+    with pytest.raises(YoctoParseError, match="has no purl form"):
+        parse_license_manifest(manifest)
+
+
+def test_a_block_naming_thousands_of_keys_does_not_flood_stderr(tmp_path):
+    # _excerpt caps one enormous key; nothing capped a huge number of small
+    # ones, and the sum was proportional to the file after all.
+    manifest = tmp_path / "license.manifest"
+    manifest.write_text("".join(f"K{i}{'X' * 300}: v\n" for i in range(3000)))
+    with pytest.raises(YoctoParseError) as exc:
+        parse_license_manifest(manifest)
+    assert len(str(exc.value)) < 2_000
+
+
+def test_one_image_losing_its_licenses_is_not_masked_by_another(tmp_path):
+    # A deploy normally holds several images -- that is why --image exists.
+    # Gating the unreadable-directory check on "no license manifest anywhere"
+    # meant one image's readable directory hid another image's blocked one, and
+    # the SBOM for the image actually asked for came out at exit 0 with every
+    # licence and recipe name missing.
+    images = tmp_path / "images" / "qemux86-64"
+    images.mkdir(parents=True)
+    for image in ("core-image-minimal", "core-image-full-cmdline"):
+        (images / f"{image}-qemux86-64.rootfs.manifest").write_text(
+            "busybox core2-64 1.36.1\n"
+        )
+        directory = _license_dir(tmp_path, "x86_64", f"{image}-qemux86-64.rootfs")
+        (directory / "license.manifest").write_text(_license_block("busybox", "1.36.1"))
+
+    blocked = (
+        tmp_path / "licenses" / "x86_64" / "core-image-full-cmdline-qemux86-64.rootfs"
+    )
+    blocked.chmod(0o000)
+    try:
+        with pytest.raises(YoctoParseError, match="could not be read"):
+            parse(tmp_path, image="core-image-full-cmdline")
+    finally:
+        blocked.chmod(0o755)
+
+
+def test_a_stale_unreadable_rebuild_directory_does_not_stop_a_good_build(tmp_path):
+    # The converse of the test above: once this image's current licence
+    # directory has been read, an older one nobody can open is irrelevant and
+    # must not turn a perfectly good deploy into an error.
+    good = _license_dir(
+        tmp_path, "x86_64", "core-image-minimal-qemux86-64.rootfs-20260902171159"
+    )
+    (good / "license.manifest").write_text(_license_block("busybox", "1.36.1"))
+    stale = _license_dir(
+        tmp_path, "x86_64", "core-image-minimal-qemux86-64.rootfs-20240101000000"
+    )
+    (stale / "license.manifest").write_text(_license_block("busybox", "1.0.0"))
+
+    stale.chmod(0o000)
+    try:
+        components, _ = parse(tmp_path)
+    finally:
+        stale.chmod(0o755)
+    assert [(c.name, c.version) for c in components] == [("busybox", "1.36.1")]
+
+
+def test_a_renamed_arch_is_resolved_through_the_symlink_target(tmp_path):
+    # Two arch directories, each holding an untimestamped symlink for the same
+    # image. Nothing in either directory name says which build is current --
+    # but the symlinks resolve to timestamped targets, and those do.
+    newest = None
+    for arch, stamp, version in (
+        ("core2-64", "20240101000000", "1.1.1w"),
+        ("qemux86_64", "20260902171159", "3.5.4"),
+    ):
+        target = _license_dir(
+            tmp_path, arch, f"core-image-minimal-qemux86-64.rootfs-{stamp}"
+        )
+        (target / "license.manifest").write_text(_license_block("openssl", version))
+        link = target.parent / "core-image-minimal-qemux86-64.rootfs"
+        link.symlink_to(target.name, target_is_directory=True)
+        newest = version
+
+    components, _ = parse(tmp_path)
+    assert [(c.name, c.version) for c in components] == [("openssl", newest)]

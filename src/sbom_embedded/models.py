@@ -25,14 +25,49 @@ def make_purl(
     *,
     qualifiers: dict[str, str | None] | None = None,
 ) -> str:
-    """Build a purl string, dropping qualifiers the manifest did not fill in."""
+    """Build a purl string, dropping qualifiers the manifest did not fill in.
+
+    Raises `ValueError` for a name that has no purl form at all. packageurl
+    signals that inconsistently -- a `ValueError` for the empty string, but a
+    bare `TypeError` from inside `"".join(...)` for a name that its own
+    normalisation reduces to nothing -- and a `TypeError` escaping a parser
+    reaches the user as a traceback rather than the documented `error:` line.
+    """
     kept = {k: v for k, v in (qualifiers or {}).items() if v}
-    return PackageURL(
-        type=PURL_TYPE,
-        name=name,
-        version=version or None,
-        qualifiers=kept or None,
-    ).to_string()
+    try:
+        built = PackageURL(
+            type=PURL_TYPE,
+            name=name,
+            version=version or None,
+            qualifiers=kept or None,
+        ).to_string()
+        # Parse it back and re-emit. `to_string()` is not a fixed point for
+        # every name -- packageurl percent-encodes whitespace on the way out
+        # and drops it again on the way in, so `a /b` and `a/b` build different
+        # strings that read back as one. The writer emits a purl by parsing
+        # this string, so settling the canonical form here is what keeps
+        # `Component.purl` equal to what the document will carry, and keeps two
+        # names that are indistinguishable as purls from reaching the writer as
+        # two identities.
+        return PackageURL.from_string(built).to_string()
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"{name!r} has no purl form: {err}") from err
+
+
+def has_purl_form(name: str) -> bool:
+    """Whether `name` can be carried in a purl at all.
+
+    packageurl splits a name on `/` and normalises each segment, so a name made
+    only of slashes -- `/`, `//`, `///` -- reduces to nothing and cannot be
+    represented, even though it is not blank and `str.strip()` leaves it alone.
+    Asking the library rather than reimplementing its rules is deliberate: the
+    answer cannot then drift from what `make_purl` will actually do.
+    """
+    try:
+        make_purl(name)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(slots=True)

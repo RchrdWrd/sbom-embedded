@@ -1,4 +1,5 @@
 import json
+from importlib.metadata import version
 
 from cyclonedx.schema import SchemaVersion
 from cyclonedx.validation.json import JsonStrictValidator
@@ -188,3 +189,109 @@ def test_a_non_utf8_buildroot_manifest_reports_instead_of_a_traceback(tmp_path):
     assert result.exit_code == 1
     assert "cannot read" in result.output
     assert "Traceback" not in result.output
+
+
+def test_a_package_name_with_no_purl_form_reports_instead_of_a_traceback(tmp_path):
+    # "/" is not blank, so the emptiness guards let it through; packageurl then
+    # normalises it away and dies inside "".join() with a TypeError that
+    # cli.py's except clause does not list. That reached the user as a 5 KB
+    # rich traceback quoting absolute paths -- the outcome SECURITY.md's threat
+    # model names explicitly as in scope.
+    legal = tmp_path / "legal-info"
+    legal.mkdir()
+    (legal / "manifest.csv").write_text("PACKAGE,VERSION,LICENSE\n/,1.0,MIT\n")
+    result = run(tmp_path)
+    assert result.exit_code == 1
+    assert "has no purl form" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_a_slash_only_name_in_a_yocto_manifest_is_reported_with_its_line(tmp_path):
+    images = tmp_path / "images" / "qemux86-64"
+    images.mkdir(parents=True)
+    (images / "img-qemux86-64.manifest").write_text(
+        "busybox core2_64 1.36.1\n/ core2_64 1.0\n"
+    )
+    result = run(tmp_path)
+    assert result.exit_code == 1
+    assert "img-qemux86-64.manifest:2" in result.output
+    assert "has no purl form" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_a_repeated_row_is_collapsed_and_reported(tmp_path):
+    # Re-running `make <pkg>-legal-info` appends to the existing manifest.csv,
+    # so the same row can appear twice. Both copies say the same thing and the
+    # image holds one of that package -- but two components sharing a purl made
+    # the library invent a random bom-ref for the second and leave it out of
+    # the dependency graph entirely.
+    legal = tmp_path / "legal-info"
+    legal.mkdir()
+    (legal / "manifest.csv").write_text(
+        "PACKAGE,VERSION,LICENSE\n"
+        "busybox,1.36.1,GPL-2.0\n"
+        "busybox,1.36.1,GPL-2.0\n"
+        "zlib,1.3.1,Zlib\n"
+    )
+    result = run(tmp_path)
+    assert result.exit_code == 0
+    assert "appears 2 times" in result.output
+    doc = json.loads(result.stdout)
+    assert [c["bom-ref"] for c in doc["components"]] == [
+        "pkg:generic/busybox@1.36.1",
+        "pkg:generic/zlib@1.3.1",
+    ]
+    root = next(e for e in doc["dependencies"] if e["ref"] == "buildroot")
+    assert sorted(root["dependsOn"]) == [
+        "pkg:generic/busybox@1.36.1",
+        "pkg:generic/zlib@1.3.1",
+    ]
+
+
+def test_two_rows_that_contradict_each_other_are_refused(tmp_path):
+    # Same purl, different licence: nothing here can say which is right, and
+    # picking one would put invented data into a compliance document.
+    legal = tmp_path / "legal-info"
+    legal.mkdir()
+    (legal / "manifest.csv").write_text(
+        "PACKAGE,VERSION,LICENSE\nbusybox,1.36.1,GPL-2.0\nbusybox,1.36.1,MIT\n"
+    )
+    result = run(tmp_path)
+    assert result.exit_code == 1
+    assert "disagree on license" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_a_product_name_colliding_with_a_component_is_refused(fixtures):
+    # The root shares the bom-ref namespace with every component, and --name
+    # puts its ref entirely under the user's control.
+    result = run(fixtures / "buildroot-2023.02", "--name", "pkg:generic/busybox@1.36.1")
+    assert result.exit_code == 1
+    assert "pass a different --name" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_the_written_count_matches_what_the_document_holds(tmp_path):
+    legal = tmp_path / "legal-info"
+    legal.mkdir()
+    (legal / "manifest.csv").write_text(
+        "PACKAGE,VERSION,LICENSE\nbusybox,1.36.1,GPL-2.0\nbusybox,1.36.1,GPL-2.0\n"
+    )
+    out = tmp_path / "sbom.json"
+    result = run(tmp_path, "-o", out)
+    assert result.exit_code == 0
+    assert "wrote 1 components" in result.output
+    assert len(json.loads(out.read_text())["components"]) == 1
+
+
+def test_the_reported_version_is_the_packaged_one():
+    # __version__ is hand-maintained and feeds both `--version` and every
+    # SBOM's metadata.tools entry, so a forgotten bump would misattribute every
+    # document the release produces. The publish workflow already refuses a tag
+    # that disagrees with the distribution; this ties the third copy to it.
+    from sbom_embedded import __version__
+
+    assert __version__ == version("sbom-embedded")
+    result = run("--version")
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"sbom-embedded {__version__}"

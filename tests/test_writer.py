@@ -4,7 +4,12 @@ import pytest
 from cyclonedx.validation.json import JsonStrictValidator
 
 from sbom_embedded.models import Component, make_purl
-from sbom_embedded.writer import DEFAULT_SCHEMA_VERSION, to_json
+from sbom_embedded.writer import (
+    DEFAULT_SCHEMA_VERSION,
+    DuplicateBomRefError,
+    resolve_duplicates,
+    to_json,
+)
 
 from .support import FIXED_SERIAL, FIXED_TIMESTAMP
 
@@ -191,10 +196,12 @@ def test_only_the_root_has_outgoing_edges():
 
 
 def test_rendering_stays_practical_at_a_realistic_package_count():
-    # A core-image-sato-sized image is a few thousand packages. Building the
-    # dependency edges through Bom.register_dependency was O(n^2) and took
-    # seconds; this asserts the shape of the output is unchanged and that the
-    # work is bounded.
+    # A core-image-sato-sized image is a few thousand packages. This asserts
+    # the SHAPE of the output at that size -- N components and N+1 dependency
+    # entries, with the root owning every one. It deliberately does not assert
+    # a time: rendering is quadratic in the library's own validate() step (see
+    # writer.py), so a wall-clock bound here would be a flaky test of someone
+    # else's code rather than of this one.
     components = [Component(f"pkg-{i:05d}", "1.0") for i in range(1000)]
     doc = render(components, product_name="big-image")
     assert len(doc["components"]) == 1000
@@ -203,3 +210,56 @@ def test_rendering_stays_practical_at_a_realistic_package_count():
     root_ref = doc["metadata"]["component"]["bom-ref"]
     root_edge = next(e for e in doc["dependencies"] if e["ref"] == root_ref)
     assert len(root_edge["dependsOn"]) == 1000
+
+
+def test_a_lossy_name_still_emits_one_identity_not_two():
+    # PackageURL.from_string re-normalises path segments, so parsing a purl and
+    # re-emitting it is not the identity for a name holding both a slash and
+    # whitespace. bom-ref came from the raw string and purl from the parsed
+    # object, so the document carried two different spellings of one identity
+    # -- and the purl, which is what a CVE matcher keys on, was not the one the
+    # tool computed.
+    doc = render([Component("a /b", "1.0")])
+    component = doc["components"][0]
+    assert component["bom-ref"] == component["purl"]
+    assert doc["dependencies"][0]["dependsOn"] == [component["bom-ref"]]
+
+
+def test_a_repeated_component_collapses_and_says_so():
+    components = [Component("busybox", "1.36.1"), Component("busybox", "1.36.1")]
+    kept, notes = resolve_duplicates(components)
+    assert kept == [Component("busybox", "1.36.1")]
+    assert notes == ["pkg:generic/busybox@1.36.1 appears 2 times; kept one"]
+
+
+def test_components_that_contradict_each_other_are_refused():
+    components = [
+        Component("busybox", "1.36.1", license="GPL-2.0"),
+        Component("busybox", "1.36.1", license="MIT"),
+    ]
+    with pytest.raises(DuplicateBomRefError, match="disagree on license"):
+        resolve_duplicates(components)
+
+
+def test_a_product_name_that_is_also_a_component_purl_is_refused():
+    with pytest.raises(DuplicateBomRefError, match="different --name"):
+        to_json(
+            [Component("busybox", "1.36.1")],
+            product_name="pkg:generic/busybox@1.36.1",
+        )
+
+
+def test_two_names_indistinguishable_as_purls_cannot_both_be_emitted():
+    # "a /b" and "a/b" build different purl strings -- to_string()
+    # percent-encodes the space -- but packageurl drops it again when parsing,
+    # so both render as pkg:generic/a/b@1.0. Keying the duplicate check on the
+    # raw string while emitting the parsed one let the collision through, and
+    # the library then invented a BomRef.<random> for the second component and
+    # left it out of `dependencies` entirely. Whether it is refused or
+    # collapsed, what must never happen is two components reaching the document
+    # under one identity.
+    with pytest.raises(DuplicateBomRefError):
+        to_json(
+            [Component("a /b", "1.0"), Component("a/b", "1.0")],
+            product_name="img",
+        )

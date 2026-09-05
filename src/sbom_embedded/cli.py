@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from enum import StrEnum
 from pathlib import Path
@@ -12,7 +14,53 @@ import typer
 from . import __version__
 from .parsers import buildroot, yocto
 from .parsers.detect import BuildSystem, DetectionError, detect
-from .writer import to_json
+from .writer import DuplicateBomRefError, resolve_duplicates, to_json
+
+
+def _discard_stdout() -> None:
+    """Point stdout at /dev/null so CPython's shutdown flush cannot raise.
+
+    A failed write leaves the bytes in the buffer, and the interpreter flushes
+    it again on the way out -- after this command has already chosen its exit
+    code. That second failure is what turns a properly reported error into
+    `Exception ignored while flushing sys.stdout` and exit 120.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+
+
+def _write_stdout(document: str) -> None:
+    """Write the document to stdout, reporting failure the documented way.
+
+    The `-o` path has always guarded its write; this one -- the usage the
+    README leads with, `sbom-embedded ./output > sbom.json` -- had no guard and
+    no explicit flush. Without the flush a write failure surfaces only when
+    CPython flushes at interpreter shutdown, long after this command has
+    returned, so the process exits 120 with `Exception ignored while flushing
+    sys.stdout` and leaves a truncated file behind. Flushing here is what makes
+    the error reportable at all.
+    """
+    if sys.stdout is None:
+        # CPython sets sys.stdout to None when fd 1 is closed at startup.
+        typer.secho("error: stdout is not open", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    try:
+        sys.stdout.write(document + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError as err:
+        # The reader went away -- `| head`, say. That is not a failure of this
+        # tool, but typer turns the escaping EPIPE into a silent exit 1, which
+        # collides with the code reserved for `error: <message>`. Use the
+        # conventional 128+SIGPIPE instead.
+        _discard_stdout()
+        raise typer.Exit(code=141) from err
+    except OSError as err:
+        _discard_stdout()
+        typer.secho(
+            f"error: cannot write to stdout: {err}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1) from err
+
 
 app = typer.Typer(
     add_completion=False,
@@ -127,17 +175,28 @@ def main(
 
     # product_version stays None unless the user supplies it. No manifest
     # carries a product version, so anything else would be invented.
-    document = to_json(
-        components,
-        product_name=name or label,
-        product_version=product_version,
-    )
+    try:
+        # Resolved here rather than only inside the writer so that the repeats
+        # can be reported and so `wrote N components` counts what the document
+        # actually holds.
+        components, repeats = resolve_duplicates(components)
+        document = to_json(
+            components,
+            product_name=name or label,
+            product_version=product_version,
+        )
+    except DuplicateBomRefError as err:
+        typer.secho(f"error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from err
+
+    for note in repeats:
+        typer.secho(f"warning: {note}", fg=typer.colors.YELLOW, err=True)
 
     if output is None:
         # Deliberately not typer.echo: the SBOM is data on stdout, and the
         # documented usage pipes it into a file. The trailing newline makes
         # the redirected file a well-formed text file.
-        sys.stdout.write(document + "\n")
+        _write_stdout(document)
     else:
         try:
             output.write_text(document + "\n", encoding="utf-8")

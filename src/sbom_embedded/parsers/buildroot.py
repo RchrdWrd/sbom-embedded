@@ -17,7 +17,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from ..models import Component, make_purl
+from ..models import Component, has_purl_form, make_purl
 
 
 class BuildrootParseError(Exception):
@@ -96,6 +96,13 @@ def parse_manifest_csv(path: Path) -> list[Component]:
         name = row[package_at].strip()
         if not name:
             raise BuildrootParseError(f"{path}:{lineno}: empty package name")
+        if not has_purl_form(name):
+            # A name made only of slashes is not blank, but packageurl reduces
+            # it to nothing and then raises a TypeError that would reach the
+            # user as a traceback instead of the documented error line.
+            raise BuildrootParseError(
+                f"{path}:{lineno}: package name {name!r} has no purl form"
+            )
 
         raw_version = row[version_at].strip()
         version = None if raw_version in _NO_VERSION else raw_version
