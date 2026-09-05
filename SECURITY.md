@@ -30,3 +30,9 @@ that the firmware is clean.** Components carry `pkg:generic` purls, which
 Grype, Trivy and Dependency-Track do not resolve to a vulnerability namespace.
 This is a documented limitation of the identifier, explained in the README,
 not a defect in this tool.
+
+**Nor is a scan that reports a package your build has already patched.** Yocto
+and Buildroot fix packages without changing the recorded version, and the
+manifests read here do not record the patches — so a version this SBOM reports
+as vulnerable may not be. That is a limitation of the input, explained in the
+README, and not something this tool can resolve from what it is given.

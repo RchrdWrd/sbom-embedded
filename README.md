@@ -171,6 +171,30 @@ read a clean Grype run on it as evidence that the firmware is clean.** For
 vulnerability matching you need a tool that maps package names to CPEs, or a
 scanner configured for these package names specifically.
 
+### And once matching works, it will over-report
+
+The identifier problem above produces false negatives. Fixing it exposes the
+opposite error, so it is worth knowing about before you go looking.
+
+Yocto and Buildroot do not bump a package's version when they fix it — they
+apply a patch and leave the version alone. A recipe carrying
+`CVE-2023-42363.patch` ships a `busybox` that is already fixed, and the
+manifest still says `1.36.1`. Every version-range matcher will call it
+vulnerable.
+
+**The manifests this tool reads cannot tell you otherwise.** OpenEmbedded's own
+`cve-check` solves it by reading `CVE: <id>` lines out of the patch headers in
+each recipe's `SRC_URI`, and by honouring the `CVE_STATUS` entries a recipe
+uses to declare a CVE inapplicable; Buildroot has `<PKG>_IGNORE_CVES` for the
+same purpose. All of that lives in the recipe metadata, in the build tree —
+not in `tmp/deploy` or `legal-info`, which is all this tool looks at, and not
+having to keep the build tree is the point of it.
+
+So the honest position is symmetric. A clean scan of this SBOM does not mean
+the firmware is clean; and a scan that does find something has not accounted
+for whatever your build already patched. Confirming a finding means going back
+to the recipe.
+
 ## How much of this is verified on real builds
 
 Both paths have been walked from a build to an SBOM on real hardware, not
@@ -232,6 +256,11 @@ the 37 names have no counterpart on the other side — `libc6` against `glibc`,
   each package is recorded as a `yocto:recipe` property. Where only the image
   manifest exists, the names are the Debian-renamed forms (`libc6`, `libz1`)
   with no way back.
+* **Backported fixes are invisible.** Both build systems patch packages
+  without changing the recorded version, and neither manifest records the
+  patches, so a package this SBOM lists at a vulnerable version may already be
+  fixed in your firmware. Recovering that needs the recipe metadata, which
+  this tool deliberately does not read. See above.
 * **License strings are copied, not normalised.** Yocto writes
   `GPL-2.0-only & MIT` and Buildroot `GPL-2.0+ (programs), LGPL-2.1+` — neither
   is a valid SPDX expression. Valid SPDX identifiers and expressions are

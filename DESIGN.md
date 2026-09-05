@@ -830,6 +830,28 @@ fixture.
    path where its justification does not hold (§5, §7.1).
 9. **`--image` selection by short name needs an image manifest present**
    (§10).
+10. **Backported fixes cannot be seen from a manifest, so versions
+    over-report vulnerability.** Neither build system bumps a version when it
+    patches a package: a recipe carrying `CVE-2023-42363.patch` ships a fixed
+    `busybox` and the manifest still reads `1.36.1`. This is the mirror of
+    §7.4 — the missing CPE causes false negatives, the missing patch record
+    causes false positives — and between them they bound what any matcher can
+    conclude from this document alone.
+
+    The information exists, just not in the input. OpenEmbedded's `cve-check`
+    reads `CVE: <id>` lines from the patch headers in each recipe's `SRC_URI`
+    and honours `CVE_STATUS`, the variable a recipe uses to declare a CVE
+    inapplicable with a reason; Buildroot has `<PKG>_IGNORE_CVES`. All of it
+    is recipe metadata in the build tree, and reading `tmp/deploy` alone —
+    with no build tree, no bitbake and no rebuild — is the whole premise of
+    this tool.
+
+    Three ways out, none taken here. Emit the document as it is and let a
+    consumer carry the exclusions as VEX, which is where CycloneDX puts them
+    and keeps this tool's input unchanged. Add an optional deeper mode that
+    reads recipes, which gives up the premise. Or accept `cve-check`'s own
+    output alongside the manifest for builds that already run it. The first
+    costs nothing here and is the one to design against.
 10. **Rendering is quadratic in the number of packages, and the constant is
     not small.** `output_as_string()` calls `Bom.validate()`, which calls
     `Bom.register_dependency()` once per component; that method does a linear

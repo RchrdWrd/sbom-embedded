@@ -171,6 +171,14 @@ exit 1, and Yocto purls change on builds that use a PR service.
   does, as `DESIGN.md` §7.3 already said.
 - `SECURITY.md` and `DESIGN.md` named a hard-coded version that had already
   gone stale.
+- The README documented the false negatives a `pkg:generic` purl causes at
+  length, and said nothing about the false positives that appear once matching
+  works. Neither build system bumps a version when it patches a package, and
+  the manifests read here do not record the patches, so a package listed at a
+  vulnerable version may already be fixed. Recovering that needs the recipe
+  metadata -- `cve-check`'s patch headers and `CVE_STATUS`, Buildroot's
+  `IGNORE_CVES` -- which lives in the build tree this tool exists not to
+  need. Now stated in `README.md`, `SECURITY.md` and `DESIGN.md` §12.
 
 ## [0.1.1] - 2026-09-05
 
